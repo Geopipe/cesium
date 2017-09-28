@@ -234,6 +234,14 @@ define(function() {
 
         };
 
+		this.setStartTime = function ( start ) {
+			_startTime = start;
+		};
+
+		this.getStartTime = function ( start) {
+			return _startTime;
+		};
+
         this.delay = function ( amount ) {
 
             _delayTime = amount;
