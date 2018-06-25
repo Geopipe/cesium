@@ -1,5 +1,4 @@
 define([
-        '../Core/ClippingPlaneCollection',
         '../Core/Color',
         '../Core/defaultValue',
         '../Core/defined',
@@ -20,7 +19,6 @@ define([
         './Model',
         './ModelUtility'
     ], function(
-        ClippingPlaneCollection,
         Color,
         defaultValue,
         defined,
@@ -69,9 +67,10 @@ define([
         this._batchTable = undefined;
         this._features = undefined;
 
-        /**
-         * @inheritdoc Cesium3DTileContent#featurePropertiesDirty
-         */
+        // Populate from gltf when available
+        this._batchIdAttributeName = undefined;
+        this._diffuseAttributeOrUniformName = {};
+
         this.featurePropertiesDirty = false;
 
         initialize(this, arrayBuffer, byteOffset);
@@ -81,108 +80,72 @@ define([
     Batched3DModel3DTileContent._deprecationWarning = deprecationWarning;
 
     defineProperties(Batched3DModel3DTileContent.prototype, {
-        /**
-         * @inheritdoc Cesium3DTileContent#featuresLength
-         */
         featuresLength : {
             get : function() {
                 return this._batchTable.featuresLength;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#pointsLength
-         */
         pointsLength : {
             get : function() {
                 return 0;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#trianglesLength
-         */
         trianglesLength : {
             get : function() {
                 return this._model.trianglesLength;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#geometryByteLength
-         */
         geometryByteLength : {
             get : function() {
                 return this._model.geometryByteLength;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#texturesByteLength
-         */
         texturesByteLength : {
             get : function() {
                 return this._model.texturesByteLength;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#batchTableByteLength
-         */
         batchTableByteLength : {
             get : function() {
                 return this._batchTable.memorySizeInBytes;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#innerContents
-         */
         innerContents : {
             get : function() {
                 return undefined;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#readyPromise
-         */
         readyPromise : {
             get : function() {
                 return this._model.readyPromise;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#tileset
-         */
         tileset : {
             get : function() {
                 return this._tileset;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#tile
-         */
         tile : {
             get : function() {
                 return this._tile;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#url
-         */
         url: {
             get: function() {
                 return this._resource.getUrlComponent(true);
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#batchTable
-         */
         batchTable : {
             get : function() {
                 return this._batchTable;
@@ -206,11 +169,15 @@ define([
     function getVertexShaderCallback(content) {
         return function(vs, programId) {
             var batchTable = content._batchTable;
-            var gltf = content._model.gltf;
             var handleTranslucent = !defined(content._tileset.classificationType);
-            var batchIdAttributeName = getBatchIdAttributeName(gltf);
-            var diffuseAttributeOrUniformName = ModelUtility.getDiffuseAttributeOrUniform(gltf, programId);
-            var callback = batchTable.getVertexShaderCallback(handleTranslucent, batchIdAttributeName, diffuseAttributeOrUniformName);
+
+            var gltf = content._model.gltf;
+            if (defined(gltf)) {
+                content._batchIdAttributeName = getBatchIdAttributeName(gltf);
+                content._diffuseAttributeOrUniformName[programId] = ModelUtility.getDiffuseAttributeOrUniform(gltf, programId);
+            }
+
+            var callback = batchTable.getVertexShaderCallback(handleTranslucent, content._batchIdAttributeName, content._diffuseAttributeOrUniformName[programId]);
             return defined(callback) ? callback(vs) : vs;
         };
     }
@@ -218,9 +185,13 @@ define([
     function getPickVertexShaderCallback(content) {
         return function(vs) {
             var batchTable = content._batchTable;
+
             var gltf = content._model.gltf;
-            var batchIdAttributeName = getBatchIdAttributeName(gltf);
-            var callback = batchTable.getPickVertexShaderCallback(batchIdAttributeName);
+            if (defined(gltf)) {
+                content._batchIdAttributeName = getBatchIdAttributeName(gltf);
+            }
+
+            var callback = batchTable.getPickVertexShaderCallback(content._batchIdAttributeName);
             return defined(callback) ? callback(vs) : vs;
         };
     }
@@ -228,10 +199,13 @@ define([
     function getFragmentShaderCallback(content) {
         return function(fs, programId) {
             var batchTable = content._batchTable;
-            var gltf = content._model.gltf;
             var handleTranslucent = !defined(content._tileset.classificationType);
-            var diffuseAttributeOrUniformName = ModelUtility.getDiffuseAttributeOrUniform(gltf, programId);
-            var callback = batchTable.getFragmentShaderCallback(handleTranslucent, diffuseAttributeOrUniformName);
+
+            var gltf = content._model.gltf;
+            if (defined(gltf)) {
+                content._diffuseAttributeOrUniformName[programId] = ModelUtility.getDiffuseAttributeOrUniform(gltf, programId);
+            }
+            var callback = batchTable.getFragmentShaderCallback(handleTranslucent, content._diffuseAttributeOrUniformName[programId]);
             return defined(callback) ? callback(fs) : fs;
         };
     }
@@ -379,15 +353,6 @@ define([
         };
 
         if (!defined(tileset.classificationType)) {
-            var clippingPlanes;
-            if (defined(tileset.clippingPlanes)) {
-                clippingPlanes = tileset.clippingPlanes.clone();
-            } else {
-                clippingPlanes = new ClippingPlaneCollection({
-                    enabled : false
-                });
-            }
-
             // PERFORMANCE_IDEA: patch the shader on demand, e.g., the first time show/color changes.
             // The pick shader still needs to be patched.
             content._model = new Model({
@@ -409,8 +374,7 @@ define([
                 pickFragmentShaderLoaded : batchTable.getPickFragmentShaderCallback(),
                 pickUniformMapLoaded : batchTable.getPickUniformMapCallback(),
                 addBatchIdToGeneratedShaders : (batchLength > 0), // If the batch table has values in it, generated shaders will need a batchId attribute
-                pickObject : pickObject,
-                clippingPlanes : clippingPlanes
+                pickObject : pickObject
             });
         } else {
             // This transcodes glTF to an internal representation for geometry so we can take advantage of the re-batching of vector data.
@@ -446,16 +410,10 @@ define([
         }
     }
 
-    /**
-     * @inheritdoc Cesium3DTileContent#hasProperty
-     */
     Batched3DModel3DTileContent.prototype.hasProperty = function(batchId, name) {
         return this._batchTable.hasProperty(batchId, name);
     };
 
-    /**
-     * @inheritdoc Cesium3DTileContent#getFeature
-     */
     Batched3DModel3DTileContent.prototype.getFeature = function(batchId) {
         //>>includeStart('debug', pragmas.debug);
         var featuresLength = this.featuresLength;
@@ -468,9 +426,6 @@ define([
         return this._features[batchId];
     };
 
-    /**
-     * @inheritdoc Cesium3DTileContent#applyDebugSettings
-     */
     Batched3DModel3DTileContent.prototype.applyDebugSettings = function(enabled, color) {
         color = enabled ? color : Color.WHITE;
         if (this.featuresLength === 0) {
@@ -480,16 +435,10 @@ define([
         }
     };
 
-    /**
-     * @inheritdoc Cesium3DTileContent#applyStyle
-     */
     Batched3DModel3DTileContent.prototype.applyStyle = function(frameState, style) {
         this._batchTable.applyStyle(frameState, style);
     };
 
-    /**
-     * @inheritdoc Cesium3DTileContent#update
-     */
     Batched3DModel3DTileContent.prototype.update = function(tileset, frameState) {
         var commandStart = frameState.commandList.length;
 
@@ -503,12 +452,17 @@ define([
 
         // Update clipping planes
         var tilesetClippingPlanes = this._tileset.clippingPlanes;
-        var modelClippingPlanes = this._model.clippingPlanes;
-        if (defined(tilesetClippingPlanes)) {
-            tilesetClippingPlanes.clone(modelClippingPlanes);
-            modelClippingPlanes.enabled = tilesetClippingPlanes.enabled && this._tile._isClipped;
-        } else if (defined(modelClippingPlanes) && modelClippingPlanes.enabled) {
-            modelClippingPlanes.enabled = false;
+        if (this._tile.clippingPlanesDirty && defined(tilesetClippingPlanes)) {
+            // Dereference the clipping planes from the model if they are irrelevant.
+            // Link/Dereference directly to avoid ownership checks.
+            // This will also trigger synchronous shader regeneration to remove or add the clipping plane and color blending code.
+            this._model._clippingPlanes = (tilesetClippingPlanes.enabled && this._tile._isClipped) ? tilesetClippingPlanes : undefined;
+        }
+
+        // If the model references a different ClippingPlaneCollection due to the tileset's collection being replaced with a
+        // ClippingPlaneCollection that gives this tile the same clipping status, update the model to use the new ClippingPlaneCollection.
+        if (defined(tilesetClippingPlanes) && defined(this._model._clippingPlanes) && this._model._clippingPlanes !== tilesetClippingPlanes) {
+            this._model._clippingPlanes = tilesetClippingPlanes;
         }
 
         this._model.update(frameState);
@@ -521,16 +475,10 @@ define([
         }
    };
 
-    /**
-     * @inheritdoc Cesium3DTileContent#isDestroyed
-     */
     Batched3DModel3DTileContent.prototype.isDestroyed = function() {
         return false;
     };
 
-    /**
-     * @inheritdoc Cesium3DTileContent#destroy
-     */
     Batched3DModel3DTileContent.prototype.destroy = function() {
         this._model = this._model && this._model.destroy();
         this._batchTable = this._batchTable && this._batchTable.destroy();

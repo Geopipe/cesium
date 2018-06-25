@@ -2,7 +2,6 @@ define([
         '../Core/Cartesian2',
         '../Core/Cartesian3',
         '../Core/Cartesian4',
-        '../Core/ClippingPlaneCollection',
         '../Core/Color',
         '../Core/combine',
         '../Core/ComponentDatatype',
@@ -13,6 +12,7 @@ define([
         '../Core/DeveloperError',
         '../Core/FeatureDetection',
         '../Core/getStringFromTypedArray',
+        '../Core/Math',
         '../Core/Matrix3',
         '../Core/Matrix4',
         '../Core/oneTimeWarning',
@@ -34,13 +34,15 @@ define([
         './Cesium3DTileBatchTable',
         './Cesium3DTileFeature',
         './Cesium3DTileFeatureTable',
+        './ClippingPlaneCollection',
+        './getClipAndStyleCode',
+        './getClippingFunction',
         './SceneMode',
         './ShadowMode'
     ], function(
         Cartesian2,
         Cartesian3,
         Cartesian4,
-        ClippingPlaneCollection,
         Color,
         combine,
         ComponentDatatype,
@@ -51,6 +53,7 @@ define([
         DeveloperError,
         FeatureDetection,
         getStringFromTypedArray,
+        CesiumMath,
         Matrix3,
         Matrix4,
         oneTimeWarning,
@@ -72,6 +75,9 @@ define([
         Cesium3DTileBatchTable,
         Cesium3DTileFeature,
         Cesium3DTileFeatureTable,
+        ClippingPlaneCollection,
+        getClipAndStyleCode,
+        getClippingFunction,
         SceneMode,
         ShadowMode) {
     'use strict';
@@ -121,10 +127,6 @@ define([
         this._hasNormals = false;
         this._hasBatchIds = false;
 
-        // Used to regenerate shader when clipping on this tile changes
-        this._isClipped = false;
-        this._unionClippingRegions = false;
-
         // Use per-point normals to hide back-facing points.
         this.backFaceCulling = false;
         this._backFaceCulling = false;
@@ -146,12 +148,8 @@ define([
 
         this._features = undefined;
 
-        this._packedClippingPlanes = [];
         this._modelViewMatrix = Matrix4.clone(Matrix4.IDENTITY);
 
-        /**
-         * @inheritdoc Cesium3DTileContent#featurePropertiesDirty
-         */
         this.featurePropertiesDirty = false;
 
         // Options for geometric error based attenuation
@@ -165,9 +163,6 @@ define([
     }
 
     defineProperties(PointCloud3DTileContent.prototype, {
-        /**
-         * @inheritdoc Cesium3DTileContent#featuresLength
-         */
         featuresLength : {
             get : function() {
                 if (defined(this._batchTable)) {
@@ -177,45 +172,30 @@ define([
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#pointsLength
-         */
         pointsLength : {
             get : function() {
                 return this._pointsLength;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#trianglesLength
-         */
         trianglesLength : {
             get : function() {
                 return 0;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#geometryByteLength
-         */
         geometryByteLength : {
             get : function() {
                 return this._geometryByteLength;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#texturesByteLength
-         */
         texturesByteLength : {
             get : function() {
                 return 0;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#batchTableByteLength
-         */
         batchTableByteLength : {
             get : function() {
                 if (defined(this._batchTable)) {
@@ -225,54 +205,36 @@ define([
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#innerContents
-         */
         innerContents : {
             get : function() {
                 return undefined;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#readyPromise
-         */
         readyPromise : {
             get : function() {
                 return this._readyPromise.promise;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#tileset
-         */
         tileset : {
             get : function() {
                 return this._tileset;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#tile
-         */
         tile : {
             get : function() {
                 return this._tile;
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#url
-         */
         url : {
             get : function() {
                 return this._resource.getUrlComponent(true);
             }
         },
 
-        /**
-         * @inheritdoc Cesium3DTileContent#batchTable
-         */
         batchTable : {
             get : function() {
                 return this._batchTable;
@@ -466,7 +428,7 @@ define([
         // Typical use case is leaves, where lower estimates of interpoint distance might
         // lead to underattenuation.
         var sphereVolume = content._tile.contentBoundingVolume.boundingSphere.volume();
-        content._baseResolutionApproximation = Math.cbrt(sphereVolume / pointsLength);
+        content._baseResolutionApproximation = CesiumMath.cbrt(sphereVolume / pointsLength);
     }
 
     var scratchPointSizeAndTilesetTimeAndGeometricErrorAndDepthMultiplier = new Cartesian4();
@@ -477,6 +439,7 @@ define([
     var batchIdLocation = 3;
     var numberOfAttributes = 4;
 
+    var scratchClippingPlaneMatrix = new Matrix4();
     function createResources(content, frameState) {
         var context = frameState.context;
         var parsedContent = content._parsedContent;
@@ -539,7 +502,6 @@ define([
                 }
             }
         }
-
         var uniformMap = {
             u_pointSizeAndTilesetTimeAndGeometricErrorAndDepthMultiplier : function() {
                 var scratch = scratchPointSizeAndTilesetTimeAndGeometricErrorAndDepthMultiplier;
@@ -572,15 +534,12 @@ define([
             u_constantColor : function() {
                 return content._constantColor;
             },
-            u_clippingPlanesLength : function() {
-                return content._packedClippingPlanes.length;
-            },
             u_clippingPlanes : function() {
-                return content._packedClippingPlanes;
+                var clippingPlanes = content._tileset.clippingPlanes;
+                return (!defined(clippingPlanes) || !clippingPlanes.enabled) ? context.defaultTexture : clippingPlanes.texture;
             },
             u_clippingPlanesEdgeStyle : function() {
                 var clippingPlanes = content._tileset.clippingPlanes;
-
                 if (!defined(clippingPlanes)) {
                     return Color.WHITE.withAlpha(0.0);
                 }
@@ -588,6 +547,13 @@ define([
                 var style = Color.clone(clippingPlanes.edgeColor);
                 style.alpha = clippingPlanes.edgeWidth;
                 return style;
+            },
+            u_clippingPlanesMatrix : function() {
+                var clippingPlanes = content._tileset.clippingPlanes;
+                if (!defined(clippingPlanes)) {
+                    return Matrix4.IDENTITY;
+                }
+                return Matrix4.multiply(content._modelViewMatrix, clippingPlanes.modelMatrix, scratchClippingPlaneMatrix);
             }
         };
 
@@ -884,7 +850,7 @@ define([
         var hasColorStyle = defined(colorStyleFunction);
         var hasShowStyle = defined(showStyleFunction);
         var hasPointSizeStyle = defined(pointSizeStyleFunction);
-        var hasClippedContent = defined(clippingPlanes) && clippingPlanes.enabled && content._tile._isClipped && ClippingPlaneCollection.isSupported();
+        var hasClippedContent = defined(clippingPlanes) && clippingPlanes.enabled && content._tile._isClipped;
 
         // Get the properties in use by the style
         var styleableProperties = [];
@@ -1117,9 +1083,12 @@ define([
         var fs = 'varying vec4 v_color; \n';
 
         if (hasClippedContent) {
-            fs += 'uniform int u_clippingPlanesLength;' +
-                  'uniform vec4 u_clippingPlanes[czm_maxClippingPlanes]; \n' +
+            fs += 'uniform sampler2D u_clippingPlanes; \n' +
+                  'uniform mat4 u_clippingPlanesMatrix; \n' +
                   'uniform vec4 u_clippingPlanesEdgeStyle; \n';
+            fs += '\n';
+            fs += getClippingFunction(clippingPlanes, context);
+            fs += '\n';
         }
 
         fs +=  'void main() \n' +
@@ -1127,15 +1096,7 @@ define([
                '    gl_FragColor = v_color; \n';
 
         if (hasClippedContent) {
-            var clippingFunction = clippingPlanes.unionClippingRegions ? 'czm_discardIfClippedWithUnion' : 'czm_discardIfClippedWithIntersect';
-            fs += '    float clipDistance = ' + clippingFunction + '(u_clippingPlanes, u_clippingPlanesLength); \n' +
-                  '    vec4 clippingPlanesEdgeColor = vec4(1.0); \n' +
-                  '    clippingPlanesEdgeColor.rgb = u_clippingPlanesEdgeStyle.rgb; \n' +
-                  '    float clippingPlanesEdgeWidth = u_clippingPlanesEdgeStyle.a; \n' +
-                  '    if (clipDistance > 0.0 && clipDistance < clippingPlanesEdgeWidth) \n' +
-                  '    { \n' +
-                  '        gl_FragColor = clippingPlanesEdgeColor; \n' +
-                  '    } \n';
+            fs += getClipAndStyleCode('u_clippingPlanes', 'u_clippingPlanesMatrix', 'u_clippingPlanesEdgeStyle');
         }
 
         fs += '} \n';
@@ -1203,9 +1164,6 @@ define([
         }
     }
 
-    /**
-     * @inheritdoc Cesium3DTileContent#hasProperty
-     */
     PointCloud3DTileContent.prototype.hasProperty = function(batchId, name) {
         if (defined(this._batchTable)) {
             return this._batchTable.hasProperty(batchId, name);
@@ -1239,16 +1197,10 @@ define([
         return this._features[batchId];
     };
 
-    /**
-     * @inheritdoc Cesium3DTileContent#applyDebugSettings
-     */
     PointCloud3DTileContent.prototype.applyDebugSettings = function(enabled, color) {
         this._highlightColor = enabled ? color : Color.WHITE;
     };
 
-    /**
-     * @inheritdoc Cesium3DTileContent#applyStyle
-     */
     PointCloud3DTileContent.prototype.applyStyle = function(frameState, style) {
         if (defined(this._batchTable)) {
             this._batchTable.applyStyle(frameState, style);
@@ -1260,9 +1212,6 @@ define([
     var scratchComputedTranslation = new Cartesian4();
     var scratchComputedMatrixIn2D = new Matrix4();
 
-    /**
-     * @inheritdoc Cesium3DTileContent#update
-     */
     PointCloud3DTileContent.prototype.update = function(tileset, frameState) {
         var modelMatrix = this._tile.computedTransform;
         var modelMatrixChanged = !Matrix4.equals(this._modelMatrix, modelMatrix);
@@ -1271,27 +1220,6 @@ define([
         this._mode = frameState.mode;
 
         var context = frameState.context;
-
-        // update clipping planes
-        var clippingPlanes = this._tileset.clippingPlanes;
-        var clippingEnabled = defined(clippingPlanes) && clippingPlanes.enabled && this._tile._isClipped;
-
-        var unionClippingRegions = false;
-        var length = 0;
-        if (clippingEnabled) {
-            unionClippingRegions = clippingPlanes.unionClippingRegions;
-            length = clippingPlanes.length;
-        }
-
-        var packedPlanes = this._packedClippingPlanes;
-        var packedLength = packedPlanes.length;
-        if (packedLength !== length) {
-            packedPlanes.length = length;
-
-            for (var i = 0; i < length; ++i) {
-                packedPlanes[i] = new Cartesian4();
-            }
-        }
 
         if (!defined(this._drawCommand)) {
             createResources(this, frameState);
@@ -1302,11 +1230,16 @@ define([
             this._parsedContent = undefined; // Unload
         }
 
-        if (this._isClipped !== clippingEnabled || this._unionClippingRegions !== unionClippingRegions) {
-            this._isClipped = clippingEnabled;
-            this._unionClippingRegions = unionClippingRegions;
-
+        // update for clipping planes
+        if (this._tile.clippingPlanesDirty) {
             createShaders(this, frameState, tileset.style);
+        }
+
+        var clippingPlanes = this._tileset.clippingPlanes;
+        var clippingEnabled = defined(clippingPlanes) && clippingPlanes.enabled && this._tile._isClipped;
+
+        if (clippingEnabled) {
+            Matrix4.multiply(context.uniformState.view3D, modelMatrix, this._modelViewMatrix);
         }
 
         // Update attenuation
@@ -1358,11 +1291,6 @@ define([
             this._pickCommand.boundingVolume = boundingVolume;
         }
 
-        if (clippingEnabled) {
-            Matrix4.multiply(context.uniformState.view3D, modelMatrix, this._modelViewMatrix);
-            clippingPlanes.transformAndPackPlanes(this._modelViewMatrix, packedPlanes);
-        }
-
         this._drawCommand.castShadows = ShadowMode.castShadows(tileset.shadows);
         this._drawCommand.receiveShadows = ShadowMode.receiveShadows(tileset.shadows);
 
@@ -1391,16 +1319,10 @@ define([
         }
     };
 
-    /**
-     * @inheritdoc Cesium3DTileContent#isDestroyed
-     */
     PointCloud3DTileContent.prototype.isDestroyed = function() {
         return false;
     };
 
-    /**
-     * @inheritdoc Cesium3DTileContent#destroy
-     */
     PointCloud3DTileContent.prototype.destroy = function() {
         var command = this._drawCommand;
         var pickCommand = this._pickCommand;

@@ -1,7 +1,6 @@
 define([
         '../../Core/BoundingSphere',
         '../../Core/Cartesian3',
-        '../../Core/Check',
         '../../Core/Clock',
         '../../Core/defaultValue',
         '../../Core/defined',
@@ -49,7 +48,6 @@ define([
     ], function(
         BoundingSphere,
         Cartesian3,
-        Check,
         Clock,
         defaultValue,
         defined,
@@ -272,7 +270,7 @@ define([
      * @param {ProviderViewModel[]} [options.imageryProviderViewModels=createDefaultImageryProviderViewModels()] The array of ProviderViewModels to be selectable from the BaseLayerPicker.  This value is only valid if options.baseLayerPicker is set to true.
      * @param {ProviderViewModel} [options.selectedTerrainProviderViewModel] The view model for the current base terrain layer, if not supplied the first available base layer is used.  This value is only valid if options.baseLayerPicker is set to true.
      * @param {ProviderViewModel[]} [options.terrainProviderViewModels=createDefaultTerrainProviderViewModels()] The array of ProviderViewModels to be selectable from the BaseLayerPicker.  This value is only valid if options.baseLayerPicker is set to true.
-     * @param {ImageryProvider} [options.imageryProvider=new BingMapsImageryProvider()] The imagery provider to use.  This value is only valid if options.baseLayerPicker is set to false.
+     * @param {ImageryProvider} [options.imageryProvider=createWorldImagery()] The imagery provider to use.  This value is only valid if options.baseLayerPicker is set to false.
      * @param {TerrainProvider} [options.terrainProvider=new EllipsoidTerrainProvider()] The terrain provider to use
      * @param {SkyBox} [options.skyBox] The skybox used to render the stars.  When <code>undefined</code>, the default stars are used.
      * @param {SkyAtmosphere} [options.skyAtmosphere] Blue sky, and the glow around the Earth's limb.  Set to <code>false</code> to turn it off.
@@ -299,8 +297,6 @@ define([
      * @param {Number} [options.maximumRenderTimeChange=0.0] If requestRenderMode is true, this value defines the maximum change in simulation time allowed before a render is requested. See {@link https://cesium.com/blog/2018/01/24/cesium-scene-rendering-performance/|Improving Performance with Explicit Rendering}.
      *
      * @exception {DeveloperError} Element with id "container" does not exist in the document.
-     * @exception {DeveloperError} options.imageryProvider is not available when using the BaseLayerPicker widget, specify options.selectedImageryProviderViewModel instead.
-     * @exception {DeveloperError} options.terrainProvider is not available when using the BaseLayerPicker widget, specify options.selectedTerrainProviderViewModel instead.
      * @exception {DeveloperError} options.selectedImageryProviderViewModel is not available when not using the BaseLayerPicker widget, specify options.imageryProvider instead.
      * @exception {DeveloperError} options.selectedTerrainProviderViewModel is not available when not using the BaseLayerPicker widget, specify options.terrainProvider instead.
      *
@@ -320,10 +316,8 @@ define([
      * var viewer = new Cesium.Viewer('cesiumContainer', {
      *     //Start in Columbus Viewer
      *     sceneMode : Cesium.SceneMode.COLUMBUS_VIEW,
-     *     //Use standard Cesium terrain
-     *     terrainProvider : new Cesium.CesiumTerrainProvider({
-     *         url : 'https://assets.agi.com/stk-terrain/v1/tilesets/world/tiles'
-     *     }),
+     *     //Use Cesium World Terrain
+     *     terrainProvider : Cesium.createWorldTerrain(),
      *     //Hide the base layer picker
      *     baseLayerPicker : false,
      *     //Use OpenStreetMaps
@@ -368,22 +362,10 @@ define([
                                     (!defined(options.baseLayerPicker) || options.baseLayerPicker !== false);
 
         //>>includeStart('debug', pragmas.debug);
-        // If using BaseLayerPicker, imageryProvider is an invalid option
-        if (createBaseLayerPicker && defined(options.imageryProvider)) {
-            throw new DeveloperError('options.imageryProvider is not available when using the BaseLayerPicker widget. \
-Either specify options.selectedImageryProviderViewModel instead or set options.baseLayerPicker to false.');
-        }
-
         // If not using BaseLayerPicker, selectedImageryProviderViewModel is an invalid option
         if (!createBaseLayerPicker && defined(options.selectedImageryProviderViewModel)) {
             throw new DeveloperError('options.selectedImageryProviderViewModel is not available when not using the BaseLayerPicker widget. \
 Either specify options.imageryProvider instead or set options.baseLayerPicker to true.');
-        }
-
-        // If using BaseLayerPicker, terrainProvider is an invalid option
-        if (createBaseLayerPicker && defined(options.terrainProvider)) {
-            throw new DeveloperError('options.terrainProvider is not available when using the BaseLayerPicker widget. \
-Either specify options.selectedTerrainProviderViewModel instead or set options.baseLayerPicker to false.');
         }
 
         // If not using BaseLayerPicker, selectedTerrainProviderViewModel is an invalid option
@@ -430,8 +412,7 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
 
         // Cesium widget
         var cesiumWidget = new CesiumWidget(cesiumWidgetContainer, {
-            terrainProvider : options.terrainProvider,
-            imageryProvider : createBaseLayerPicker ? false : options.imageryProvider,
+            imageryProvider: createBaseLayerPicker || defined(options.imageryProvider) ? false : undefined,
             clock : clock,
             skyBox : options.skyBox,
             skyAtmosphere : options.skyAtmosphere,
@@ -461,15 +442,17 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
             destroyDataSourceCollection = true;
         }
 
+        var scene = cesiumWidget.scene;
+
         var dataSourceDisplay = new DataSourceDisplay({
-            scene : cesiumWidget.scene,
+            scene : scene,
             dataSourceCollection : dataSourceCollection
         });
 
         var eventHelper = new EventHelper();
 
         eventHelper.add(clock.onTick, Viewer.prototype._onTick, this);
-        eventHelper.add(cesiumWidget.scene.morphStart, Viewer.prototype._clearTrackedObject, this);
+        eventHelper.add(scene.morphStart, Viewer.prototype._clearTrackedObject, this);
 
         // Selection Indicator
         var selectionIndicator;
@@ -477,7 +460,7 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
             var selectionIndicatorContainer = document.createElement('div');
             selectionIndicatorContainer.className = 'cesium-viewer-selectionIndicatorContainer';
             viewerContainer.appendChild(selectionIndicatorContainer);
-            selectionIndicator = new SelectionIndicator(selectionIndicatorContainer, cesiumWidget.scene);
+            selectionIndicator = new SelectionIndicator(selectionIndicatorContainer, scene);
         }
 
         // Info Box
@@ -507,7 +490,7 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
             geocoder = new Geocoder({
                 container : geocoderContainer,
                 geocoderServices : defined(options.geocoder) ? (isArray(options.geocoder) ? options.geocoder : [options.geocoder]) : undefined,
-                scene : cesiumWidget.scene
+                scene : scene
             });
             // Subscribe to search so that we can clear the trackedEntity when it is clicked.
             eventHelper.add(geocoder.viewModel.search.beforeExecute, Viewer.prototype._clearObjects, this);
@@ -516,7 +499,7 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
         // HomeButton
         var homeButton;
         if (!defined(options.homeButton) || options.homeButton !== false) {
-            homeButton = new HomeButton(toolbar, cesiumWidget.scene);
+            homeButton = new HomeButton(toolbar, scene);
             if (defined(geocoder)) {
                 eventHelper.add(homeButton.viewModel.command.afterExecute, function() {
                     var viewModel = geocoder.viewModel;
@@ -541,12 +524,12 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
 
         var sceneModePicker;
         if (!scene3DOnly && (!defined(options.sceneModePicker) || options.sceneModePicker !== false)) {
-            sceneModePicker = new SceneModePicker(toolbar, cesiumWidget.scene);
+            sceneModePicker = new SceneModePicker(toolbar, scene);
         }
 
         var projectionPicker;
         if (options.projectionPicker) {
-            projectionPicker = new ProjectionPicker(toolbar, cesiumWidget.scene);
+            projectionPicker = new ProjectionPicker(toolbar, scene);
         }
 
         // BaseLayerPicker
@@ -557,7 +540,7 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
             var terrainProviderViewModels = defaultValue(options.terrainProviderViewModels, createDefaultTerrainProviderViewModels());
 
             baseLayerPicker = new BaseLayerPicker(toolbar, {
-                globe : cesiumWidget.scene.globe,
+                globe : scene.globe,
                 imageryProviderViewModels : imageryProviderViewModels,
                 selectedImageryProviderViewModel : options.selectedImageryProviderViewModel,
                 terrainProviderViewModels : terrainProviderViewModels,
@@ -567,6 +550,21 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
             //Grab the dropdown for resize code.
             var elements = toolbar.getElementsByClassName('cesium-baseLayerPicker-dropDown');
             baseLayerPickerDropDown = elements[0];
+        }
+
+        // These need to be set after the BaseLayerPicker is created in order to take effect
+        if (defined(options.imageryProvider) && options.imageryProvider !== false) {
+            if (createBaseLayerPicker) {
+                baseLayerPicker.viewModel.selectedImagery = undefined;
+            }
+            scene.imageryLayers.removeAll();
+            scene.imageryLayers.addImageryProvider(options.imageryProvider);
+        }
+        if (defined(options.terrainProvider)) {
+            if (createBaseLayerPicker) {
+                baseLayerPicker.viewModel.selectedTerrain = undefined;
+            }
+            scene.terrainProvider = options.terrainProvider;
         }
 
         // Navigation Help Button
@@ -642,7 +640,7 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
             var vrContainer = document.createElement('div');
             vrContainer.className = 'cesium-viewer-vrContainer';
             viewerContainer.appendChild(vrContainer);
-            vrButton = new VRButton(vrContainer, cesiumWidget.scene, options.fullScreenElement);
+            vrButton = new VRButton(vrContainer, scene, options.fullScreenElement);
 
             vrSubscription = subscribeAndEvaluate(vrButton.viewModel, 'isVREnabled', function(isVREnabled) {
                 vrContainer.style.display = isVREnabled ? 'block' : 'none';
@@ -716,8 +714,8 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
         eventHelper.add(dataSourceCollection.dataSourceRemoved, Viewer.prototype._onDataSourceRemoved, this);
 
         // Prior to each render, check if anything needs to be resized.
-        eventHelper.add(cesiumWidget.scene.postUpdate, Viewer.prototype.resize, this);
-        eventHelper.add(cesiumWidget.scene.postRender, Viewer.prototype._postRender, this);
+        eventHelper.add(scene.postUpdate, Viewer.prototype.resize, this);
+        eventHelper.add(scene.postRender, Viewer.prototype._postRender, this);
 
         // We need to subscribe to the data sources and collections so that we can clear the
         // tracked object when it is removed from the scene.
@@ -985,18 +983,6 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
         },
 
         /**
-         * Gets the Cesium logo element.
-         * @memberof Viewer.prototype
-         * @type {Element}
-         * @readonly
-         */
-        cesiumLogo : {
-            get : function() {
-                return this._cesiumWidget.cesiumLogo;
-            }
-        },
-
-        /**
          * Gets the scene.
          * @memberof Viewer.prototype
          * @type {Scene}
@@ -1086,6 +1072,19 @@ Either specify options.terrainProvider instead or set options.baseLayerPicker to
         camera : {
             get : function() {
                 return this.scene.camera;
+            }
+        },
+
+        /**
+         * Gets the post-process stages.
+         * @memberof Viewer.prototype
+         *
+         * @type {PostProcessStageCollection}
+         * @readonly
+         */
+        postProcessStages : {
+            get : function() {
+                return this.scene.postProcessStages;
             }
         },
 

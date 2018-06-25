@@ -1,11 +1,9 @@
 define([
-        '../ThirdParty/Uri',
         './defined',
         './DeveloperError',
         './Resource',
         'require'
     ], function(
-        Uri,
         defined,
         DeveloperError,
         Resource,
@@ -48,6 +46,7 @@ define([
         baseResource = new Resource({
             url: baseUrlString
         });
+        baseResource.appendForwardSlash();
 
         return baseResource;
     }
@@ -75,6 +74,10 @@ define([
      * @private
      */
     function buildModuleUrl(moduleID) {
+        if (typeof document === 'undefined') {
+            //document is undefined in node
+            return moduleID;
+        }
         if (!defined(implementation)) {
             //select implementation
             if (defined(define.amd) && !define.amd.toUrlUndefined && defined(require.toUrl)) {
@@ -98,6 +101,10 @@ define([
 
     // exposed for testing
     buildModuleUrl._cesiumScriptRegex = cesiumScriptRegex;
+    buildModuleUrl._buildModuleUrlFromBaseUrl = buildModuleUrlFromBaseUrl;
+    buildModuleUrl._clearBaseResource = function() {
+        baseResource = undefined;
+    };
 
     /**
      * Sets the base URL for resolving modules.

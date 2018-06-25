@@ -61,6 +61,8 @@ var sourceFiles = ['Source/**/*.js',
                    '!Source/*.js',
                    '!Source/Workers/**',
                    '!Source/ThirdParty/Workers/**',
+                   '!Source/ThirdParty/pako_inflate.js',
+                   '!Source/ThirdParty/crunch.js',
                    'Source/Workers/createTaskProcessorWorker.js'];
 
 var buildFiles = ['Specs/**/*.js',
@@ -144,7 +146,7 @@ gulp.task('cloc', ['clean'], function() {
     //Run cloc on primary Source files only
     var source = new Promise(function(resolve, reject) {
         cmdLine = 'perl ' + clocPath + ' --quiet --progress-rate=0' +
-                  ' Source/ --exclude-dir=Assets,ThirdParty --exclude-list-file=copyrightHeader.js';
+                  ' Source/ --exclude-dir=Assets,ThirdParty --not-match-f=copyrightHeader.js';
 
         child_process.exec(cmdLine, function(error, stdout, stderr) {
             if (error) {
@@ -257,8 +259,7 @@ gulp.task('makeZipFile', ['release'], function() {
         'README.md',
         'web.config'
     ], {
-        base : '.',
-        nodir : true
+        base : '.'
     });
 
     var indexSrc = gulp.src('index.release.html').pipe(gulpRename('index.html'));
@@ -374,8 +375,7 @@ function deployCesium(bucketName, uploadDirectory, cacheControl, done) {
                 '*.zip',
                 '*.tgz'
             ], {
-                dot : true, // include hidden files
-                nodir : true // only directory files
+                dot : true // include hidden files
             });
         })
         .then(function(files) {
@@ -458,25 +458,35 @@ function deployCesium(bucketName, uploadDirectory, cacheControl, done) {
                 return;
             }
 
-            var objectToDelete = [];
+            var objectsToDelete = [];
             existingBlobs.forEach(function(file) {
                 //Don't delete generate zip files.
                 if (!/\.(zip|tgz)$/.test(file)) {
-                    objectToDelete.push({Key : file});
+                    objectsToDelete.push({Key : file});
                 }
             });
 
-            if (objectToDelete.length > 0) {
-                console.log('Cleaning up old files...');
-                return s3.deleteObjectsAsync({
-                                                 Bucket : bucketName,
-                                                 Delete : {
-                                                     Objects : objectToDelete
-                                                 }
-                                             })
+            if (objectsToDelete.length > 0) {
+                console.log('Cleaning ' + objectsToDelete.length + ' files...');
+
+                // If more than 1000 files, we must issue multiple requests
+                var batches = [];
+                while (objectsToDelete.length > 1000) {
+                    batches.push(objectsToDelete.splice(0, 1000));
+                }
+                batches.push(objectsToDelete);
+
+                return Promise.map(batches, function(objects) {
+                    return s3.deleteObjectsAsync({
+                        Bucket : bucketName,
+                        Delete : {
+                            Objects : objects
+                        }
+                    })
                     .then(function() {
-                        console.log('Cleaned ' + existingBlobs.length + ' files.');
+                        console.log('Cleaned ' + objects.length + ' files.');
                     });
+                }, {concurrency : concurrency});
             }
         })
         .catch(function(error) {
@@ -666,7 +676,7 @@ define(\'' + moduleId + '\', function() {\n\
         modulePathMappings.push('        \'' + moduleId + '\' : \'../Stubs/Cesium\'');
     });
 
-    contents += '})();';
+    contents += '})();\n';
 
     var paths = '\
 define(function() {\n\
@@ -913,7 +923,7 @@ function combineJavaScript(options) {
             everythingElse.push('!**/*.css');
         }
 
-        stream = gulp.src(everythingElse, {nodir : true}).pipe(gulp.dest(outputDirectory));
+        stream = gulp.src(everythingElse, { nodir: true }).pipe(gulp.dest(outputDirectory));
         promises.push(streamToPromise(stream));
 
         return Promise.all(promises).then(function() {
@@ -1069,7 +1079,7 @@ define([' + moduleIds.join(', ') + '], function(' + parameters.join(', ') + ') {
   };\n\
   ' + assignments.join('\n  ') + '\n\
   return Cesium;\n\
-});';
+});\n';
 
     fs.writeFileSync('Source/Cesium.js', contents);
 }
@@ -1082,7 +1092,7 @@ function createSpecList() {
         specs.push("'" + filePathToModuleId(file) + "'");
     });
 
-    var contents = '/*eslint-disable no-unused-vars*/\n/*eslint-disable no-implicit-globals*/\nvar specs = [' + specs.join(',') + '];';
+    var contents = '/*eslint-disable no-unused-vars*/\n/*eslint-disable no-implicit-globals*/\nvar specs = [' + specs.join(',') + '];\n';
     fs.writeFileSync(path.join('Specs', 'SpecList.js'), contents);
 }
 
@@ -1096,13 +1106,29 @@ function createGalleryList() {
         fileList.push('!Apps/Sandcastle/gallery/development/**/*.html');
     }
 
+    // On travis, the version is set to something like '1.43.0-branch-name-travisBuildNumber'
+    // We need to extract just the Major.Minor version
+    var majorMinor = packageJson.version.match(/^(.*)\.(.*)\./);
+    var major = majorMinor[1];
+    var minor = Number(majorMinor[2]) - 1; // We want the last release, not current release
+    var tagVersion = major + '.' + minor;
+
+    // Get an array of demos that were added since the last release.
+    // This includes newly staged local demos as well.
+    var newDemos = [];
+    try {
+        newDemos = child_process.execSync('git diff --name-only --diff-filter=A ' + tagVersion + ' Apps/Sandcastle/gallery/*.html').toString().trim().split('\n');
+    } catch (e) {
+        console.log('Failed to retrieve list of new Sandcastle demos from Git.');
+    }
+
     var helloWorld;
     globby.sync(fileList).forEach(function(file) {
         var demo = filePathToModuleId(path.relative('Apps/Sandcastle/gallery', file));
 
         var demoObject = {
             name : demo,
-            date : fs.statSync(file).mtime.getTime()
+            isNew: newDemos.includes(file)
         };
 
         if (fs.existsSync(file.replace('.html', '') + '.jpg')) {
@@ -1135,7 +1161,8 @@ function createGalleryList() {
     var contents = '\
 // This file is automatically rebuilt by the Cesium build process.\n\
 var hello_world_index = ' + helloWorldIndex + ';\n\
-var gallery_demos = [' + demoJSONs.join(', ') + '];';
+var gallery_demos = [' + demoJSONs.join(', ') + '];\n\
+var has_new_gallery_demos = ' + (newDemos.length > 0 ? 'true;' : 'false;') + '\n';
 
     fs.writeFileSync(output, contents);
 }
@@ -1149,7 +1176,7 @@ function createJsHintOptions() {
 
     var contents = '\
 // This file is automatically rebuilt by the Cesium build process.\n\
-var sandcastleJsHintOptions = ' + JSON.stringify(primary, null, 4) + ';';
+var sandcastleJsHintOptions = ' + JSON.stringify(primary, null, 4) + ';\n';
 
     fs.writeFileSync(path.join('Apps', 'Sandcastle', 'jsHintOptions.js'), contents);
 }
