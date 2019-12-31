@@ -39,8 +39,6 @@ THE SOFTWARE.
  * @author Ben Delarre / http://delarre.net
  */
 
-define(function() {
-
     // Date.now shim for (ahem) Internet Explo(d|r)er
     if ( Date.now === undefined ) {
 
@@ -796,5 +794,4 @@ define(function() {
 
     };
 
-return TWEEN;
-});
+export default TWEEN;
